@@ -1,0 +1,255 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Apr 20 23:58:29 2020
+
+@author: Mohamed
+"""
+
+import torch
+import numpy as np
+import torch.nn as nn
+import torch.nn.functional as F
+import argparse
+import pickle
+from torch.autograd import Variable
+import sklearn.metrics as metrics
+from sklearn.metrics import confusion_matrix
+
+import cross_val
+from model import GTN
+from model import PositivePopulationFusion
+from model import NegativePopulationFusion
+
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+def loss_dissmilarity(H_positive, H_negative):
+    loss = -torch.dist(H_positive, H_negative, 2)
+    return loss
+
+def loss_centeredness(H, graphs_torch):
+    distance=0
+    for subject in range(graphs_torch.shape[0]):
+        for view in range(graphs_torch.shape[3]):
+            d = graphs_torch[subject,:,:,view].float()
+            distance+=torch.dist(H, d, 2)
+    return distance
+
+def my_distance(H, H_positive, H_negative):
+    distance_positive = torch.sum((H - H_positive)**2)
+    distance_negative = torch.sum((H - H_negative)**2)
+    if distance_positive<distance_negative:
+        pred=1
+    else:
+        pred=0
+    return pred
+
+def minmax_sc(x):
+    min_max_scaler = preprocessing.MinMaxScaler()
+    x = min_max_scaler.fit_transform(x)
+    return x
+
+def train(args, train_dataset, val_dataset, model_GTN, model_PositivePopulationFusion, model_NegativePopulationFusion, positive_graphs_torch, negative_graphs_torch):
+    
+    optimizer = torch.optim.Adam(model_GTN.parameters(), lr=0.005, weight_decay=0.001)
+    '''tracked_H=[]
+    tracked_H_test=[]
+    tracked_adj=[]
+    tracked_positive_fusion_input=[]
+    tracked_negative_fusion_input=[]
+    tracked_positive_fusion_weight=[]
+    tracked_negative_fusion_weight=[]
+    tracked_positive_fusion_output=[]
+    tracked_negative_fusion_output=[]
+    tracked_loss=[]'''
+    for epoch in range(args.num_epochs):
+        model_GTN.train()
+        idx_pos=0
+        idx_neg=0
+        positive_loss_centeredness = 0
+        negative_loss_centeredness = 0
+        #tracked_H_epoch=[]
+        #tracked_adj_epoch=[]
+        for batch_idx, data in enumerate(train_dataset):
+            adj = Variable(data['adj'].float(), requires_grad=False).to(device)
+            label = Variable(data['label'].long()).to(device)
+            adj_id = Variable(data['id'].int()).to(device)
+            model_GTN.zero_grad()
+            H = model_GTN(adj)
+            if label.item()==1:
+                positive_loss_centeredness += loss_centeredness(H, positive_graphs_torch)
+            else:
+                negative_loss_centeredness += loss_centeredness(H, negative_graphs_torch)
+            #tracked_H_epoch.append(H.detach().numpy())
+            #tracked_adj_epoch.append(torch.squeeze(adj).detach().numpy())
+            
+            if label.item()==1:
+                if idx_pos==0:
+                    H_positive=torch.unsqueeze(H, dim=0)
+                    adj_positive=adj
+                    idx_pos=1
+                else:
+                    H_tmp = torch.unsqueeze(H, dim=0)
+                    
+                    H_positive = torch.cat([H_positive,H_tmp])
+                    adj_positive = torch.cat([adj_positive, adj])
+            else:
+                if idx_neg==0:
+                    H_negative=torch.unsqueeze(H,dim=0)
+                    adj_negative=adj
+                    idx_neg=1
+                else:
+                    H_tmp = torch.unsqueeze(H, dim=0)
+                    
+                    H_negative = torch.cat([H_negative,H_tmp])
+                    adj_negative = torch.cat([adj_negative, adj])
+        
+        #tracked_H.append(tracked_H_epoch)
+        #tracked_adj.append(tracked_adj_epoch)
+        
+        #PositiveFusionLayer = nn.Sequential(nn.Linear(H_positive.shape[0],1),nn.Dropout())
+        #NegativeFusionLayer = nn.Sequential(nn.Linear(H_negative.shape[0],1),nn.Dropout())
+        
+        #tracked_positive_fusion_input.append(H_positive.detach().numpy())
+        #tracked_negative_fusion_input.append(H_negative.detach().numpy())
+        
+        PositiveFusionLayer = nn.Sequential(nn.Linear(H_positive.shape[0],1))
+        NegativeFusionLayer = nn.Sequential(nn.Linear(H_negative.shape[0],1))
+        
+        H_positive = torch.squeeze(PositiveFusionLayer(H_positive.permute(1,2,0)))
+        H_negative = torch.squeeze(NegativeFusionLayer(H_negative.permute(1,2,0)))
+        
+        H_positive = (H_positive + torch.t(H_positive))/2
+        H_negative = (H_negative + torch.t(H_negative))/2
+        
+        #tracked_positive_fusion_weight.append(PositiveFusionLayer[0].weight.data.detach().numpy())
+        #tracked_negative_fusion_weight.append(NegativeFusionLayer[0].weight.data.detach().numpy())
+        #tracked_positive_fusion_output.append(H_positive.detach().numpy())
+        #tracked_negative_fusion_output.append(H_negative.detach().numpy())
+        
+        loss = my_loss(H_positive, H_negative, adj_positive, adj_negative, args.lambda_1, args.lambda_2)
+        loss.backward()
+        optimizer.step()
+        model_GTN.eval()
+        test_labels=[]
+        test_preds=[]
+        # eval
+        for batch_idx, data in enumerate(val_dataset):
+            adj = Variable(data['adj'].float(), requires_grad=False).to(device)
+            test_label = Variable(data['label'].long()).to(device)
+            adj_id = Variable(data['id'].int()).to(device)
+            model_GTN.zero_grad()
+            H = model_GTN(adj)
+            test_pred = my_distance(H, H_positive, H_negative)
+            acc_score = metrics.accuracy_score([test_label], [test_pred]) #label.item()
+            test_labels.append(test_label.item())
+            test_preds.append(test_pred)
+            print('Epoch:  ',epoch+1, "True label : ",test_label.item(),"Prediction : ", test_pred ,"loss :",loss)
+            #tracked_H_test.append(H.detach().numpy())
+            #tracked_adj_test = torch.squeeze(adj).detach().numpy()
+            #tracked_id_test = torch.squeeze(adj_id).detach().numpy()
+            #tracked_label_test = torch.squeeze(label_test).detach().numpy()
+            #tracked_loss.append(loss.detach().data.numpy())
+     
+  
+    # Creating the dict for tracking values  
+    tracked_Dict = {}
+    '''tracked_Dict["tracked_loss"] = tracked_loss
+    tracked_Dict["tracked_adj"] = tracked_adj 
+    tracked_Dict["tracked_H"] = tracked_H
+    tracked_Dict["tracked_positive_fusion_input"] = tracked_positive_fusion_input
+    tracked_Dict["tracked_negative_fusion_input"] = tracked_negative_fusion_input
+    tracked_Dict["tracked_positive_fusion_weight"] = tracked_positive_fusion_weight
+    tracked_Dict["tracked_negative_fusion_weight"] = tracked_negative_fusion_weight
+    tracked_Dict["tracked_positive_fusion_output"] = tracked_positive_fusion_output
+    tracked_Dict["tracked_negative_fusion_output"] = tracked_negative_fusion_output
+    tracked_Dict["tracked_H_test"] = tracked_H_test
+    tracked_Dict["tracked_adj_test"] = tracked_adj_test
+    tracked_Dict["tracked_label_test"] = tracked_label_test
+    tracked_Dict["tracked_id_test"] = tracked_id_test'''
+    
+    return test_labels, test_preds, tracked_Dict
+
+def load_data(args):
+    #Load graphs and labels
+    with open('data/'+args.dataset+'/'+args.dataset+'_edges','rb') as f:
+        adjacencies = pickle.load(f)        
+    with open('data/'+args.dataset+'/'+args.dataset+'_labels','rb') as f:
+        labels = pickle.load(f)
+    #Normalize inputs
+    for subject in range(len(adjacencies)):
+        for view in range(adjacencies[0].shape[2]):
+            adjacencies[subject][:,:,view] = minmax_sc(adjacencies[subject][:,:,view])
+    #Create List of Dictionaries
+    G_list=[]
+    for i in range(len(labels)):
+        G_element = {"adj":   adjacencies[i],"label": labels[i],"id":  i,}
+        G_list.append(G_element)
+    return G_list
+
+def arg_parse():
+    parser = argparse.ArgumentParser(description='Graph Classification')
+    parser.add_argument('--dataset', type=str, default='SD3',
+                        help='Dataset')
+    parser.add_argument('--num_epochs', type=int, default=200,
+                        help='Training Epochs')
+    parser.add_argument('--num_layers', type=int, default=2, #2
+                        help='number of layer')
+    parser.add_argument('--batch-size', type=int, default=1, # only works with batchsize=1
+                        help='Batch size.')
+    parser.add_argument('--cv_number', type=int, default=4,
+                        help='number of validation folds.')
+    parser.add_argument('--lambda_1', type=float, default=0.5,
+                        help='multiplication term for loss.')
+    parser.add_argument('--lambda_2', type=float, default=0.5,
+                        help='multiplication term for loss.')
+    return parser.parse_args()
+
+def benchmark_task(args):
+    G_list = load_data(args)
+    num_edge=G_list[0]['adj'].shape[-1]
+    if(args.cv_number>len(G_list)):
+        vals=len(G_list)
+    else:
+        vals=args.cv_number
+    preds=[]
+    labels=[]
+    for i in range(vals):
+        train_dataset, val_dataset, positive_graphs_torch, negative_graphs_torch =cross_val.prepare_data_kfold(G_list, args, i)
+        idx_pos, idx_neg = cross_val.count_populations(train_dataset)
+        
+        print("CV : ",i)
+        model_GTN = GTN(num_edge=num_edge,
+                            num_channels=2,
+                            num_layers=args.num_layers,
+                            norm=True)
+        model_PositivePopulationFusion = PositivePopulationFusion(num_subjects = idx_pos)
+        model_NegativePopulationFusion = NegativePopulationFusion(num_subjects = idx_neg)
+        label,pred,tracked_Dict = train(args, train_dataset, val_dataset, model_GTN,model_PositivePopulationFusion,model_NegativePopulationFusion,positive_graphs_torch, negative_graphs_torch)
+        labels.extend(label)
+        preds.extend(pred)
+    return labels, preds,tracked_Dict
+def main():
+    args = arg_parse()
+    print("Main : ",args)
+    labels,preds, tracked_Dict = benchmark_task(args)
+    print("finished")
+    #with open('base_tracked_Dict_'+args.dataset, 'wb') as f:
+    #    pickle.dump(tracked_Dict, f)
+    cm1 = confusion_matrix(labels, preds)
+    print('Confusion Matrix : \n', cm1)
+
+    total1=sum(sum(cm1))
+    #####from confusion matrix calculate accuracy
+    accuracy1=(cm1[0,0]+cm1[1,1])/total1
+    print ('Accuracy : ', accuracy1)
+
+    sensitivity1 = cm1[0,0]/(cm1[0,0]+cm1[0,1])
+    print('Sensitivity : ', sensitivity1 )
+
+    specificity1 = cm1[1,1]/(cm1[1,0]+cm1[1,1])
+    print('Specificity : ', specificity1)
+    
+if __name__ == '__main__':
+    main()
+    
+    
