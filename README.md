@@ -63,3 +63,15 @@ To run MICNet, first, generate a multi-view dataset with dimension shape `[num_S
 
 # Please Cite the Following paper when using MICNet:
 
+
+```latex
+@article{chaari2022multigraph,
+  title={Multigraph classification using learnable integration network with application to gender fingerprinting},
+  author={Chaari, Nada and Gharsallaoui, Mohammed Amine and Akda{\u{g}}, Hatice Camg{\"o}z and Rekik, Islem},
+  journal={Neural Networks},
+  year={2022},
+  publisher={Elsevier}
+}
+```
+
+https://www.sciencedirect.com/science/article/abs/pii/S0893608022001137
